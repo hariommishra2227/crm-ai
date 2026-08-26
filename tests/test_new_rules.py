@@ -72,8 +72,23 @@ def test_stale_deal_updates_existing_alert_and_ignores_closed_deal():
 
 
 def test_incomplete_profile_creates_one_alert_listing_missing_fields():
-    client = FakeZoho([{"id": "1", "Account_Name": "ABC", "Phone": ""}])
+    created = (datetime.now(timezone.utc) - timedelta(days=12, seconds=5)).isoformat()
+    client = FakeZoho(
+        [
+            {
+                "id": "1",
+                "Account_Name": "ABC",
+                "Phone": "",
+                "Owner": {"id": "7"},
+                "Created_Time": created,
+            }
+        ]
+    )
     result = IncompleteAccountProfileRule(client, settings()).run()
     assert result.alerts_created == 1
     assert "Phone" not in client.created[0]
     assert None not in client.created[0]
+    assert client.created[0]["Name"] == "ABC"
+    assert client.created[0]["Categor"] == "Incomplete Profile"
+    assert client.created[0]["Inactive_Days"] == 12
+    assert client.created[0]["Owner"] == {"id": "7"}

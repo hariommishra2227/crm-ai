@@ -41,9 +41,51 @@ RULES = {
     "stale_deal": StaleDealRule,
     "incomplete_account_profile": IncompleteAccountProfileRule,
 }
+_rule_scan_locks = {name: Lock() for name in RULES}
+
+
+def recover_interrupted_scan_runs() -> int:
+    finished_at = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        runs = db.scalars(
+            select(ScanRun).where(
+                ScanRun.status == "running",
+                ScanRun.finished_at.is_(None),
+            )
+        ).all()
+        for run in runs:
+            run.status = "interrupted"
+            run.finished_at = finished_at
+            run.failure_message = (
+                "Scan interrupted by application restart or deployment."
+            )
+            if run.started_at:
+                started_at = run.started_at
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=timezone.utc)
+                run.duration_seconds = max(
+                    0.0, (finished_at - started_at).total_seconds()
+                )
+        db.commit()
+
+    logger.info("recovered %s interrupted scan runs", len(runs))
+    return len(runs)
 
 
 def execute_scan(rule_name: str = "account_without_contact") -> dict:
+    rule_lock = _rule_scan_locks[rule_name]
+    if not rule_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="Scan already running for this rule",
+        )
+    try:
+        return _execute_scan_unlocked(rule_name)
+    finally:
+        rule_lock.release()
+
+
+def _execute_scan_unlocked(rule_name: str) -> dict:
     started_at = datetime.now(timezone.utc)
     run = ScanRun(rule=rule_name, status="running", started_at=started_at)
     client: ZohoClient | None = None
@@ -142,6 +184,7 @@ def run_scheduled_scan() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    recover_interrupted_scan_runs()
     if settings.schedule_enabled:
         scheduler.add_job(
             run_scheduled_scan,

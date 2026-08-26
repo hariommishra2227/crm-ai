@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # Zoho Modules
     zoho_accounts_module: str = "Accounts"
     zoho_deals_module: str = "Deals"
-    zoho_alerts_module: str = "CRM_Alerts"
+    zoho_alerts_module: str = "CRM_Alert"
     # Related Lists
     zoho_account_deals_related_list: str = "Deals"
     zoho_account_quotes_related_list: str = "Quotes"

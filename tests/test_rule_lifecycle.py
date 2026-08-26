@@ -6,6 +6,7 @@ from app.rules import (
     IncompleteAccountProfileRule,
     StaleDealRule,
     _zoho_datetime_now,
+    alert_category_value,
     alert_severity,
 )
 
@@ -103,3 +104,13 @@ def test_datetime_format_and_deterministic_severity():
     assert alert_severity("Stale Deal", 30) == "Medium"
     assert alert_severity("Deal Without Quote") == "High"
     assert alert_severity("Account Without Contact") == "Medium"
+
+
+def test_short_readable_alert_category_values():
+    assert alert_category_value("Account Without Contact") == "No Contact"
+    assert alert_category_value("Account Without Deal") == "No Deal"
+    assert alert_category_value("Account Without Quote") == "No Quote"
+    assert alert_category_value("Incomplete Account Profile") == "Incomplete Profile"
+    assert alert_category_value("Stale Account") == "Stale Account"
+    assert alert_category_value("Stale Deal") == "Stale Deal"
+    assert alert_category_value("Deal Without Quote") == "Deal No Quote"
