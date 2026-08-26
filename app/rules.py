@@ -118,6 +118,7 @@ class AccountWithoutContactRule:
                         self._update_open_alert(
                             existing, account, account_age_days
                         )
+                        result.alerts_updated += 1
                     elif existing:
                         self._reopen_alert(
                             account, str(existing["id"]), account_age_days
@@ -326,6 +327,7 @@ class AlertRule:
                     str(existing["id"]),
                     changes,
                 )
+                result.alerts_updated += 1
                 return
             changes = {
                 self.s.alert_status_field: "Open",
@@ -417,10 +419,6 @@ class RelatedRecordMissingRule(AlertRule):
                     str(account["id"]) if isinstance(account, dict) and account.get("id") else None
                 )
                 alert_name = name
-                if module != self.s.zoho_accounts_module:
-                    alert_name = f"{self.title_prefix}: {name}"
-                    if isinstance(account, dict) and account.get("name"):
-                        alert_name = f"{alert_name} - {account['name']}"
                 self._create_if_missing(
                     result,
                     alerts.get(key),
@@ -548,12 +546,9 @@ class StaleRule(AlertRule):
                         f"Stage: {stage or 'Not available'}; inactive days: {days}."
                     )
                 existing = alerts.get(key)
-                alert_name = (
-                    name
-                    if self.key_prefix == "ACCOUNT"
-                    else f"{self.title_prefix} {days} days: {name}"
-                )
+                alert_name = name
                 if existing and existing.get(self.s.alert_status_field) != "Resolved":
+                    result.alerts_already_open += 1
                     changes = {
                         self.s.alert_name_field: alert_name,
                         self.s.alert_category_field: alert_category_value(
