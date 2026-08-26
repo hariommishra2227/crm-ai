@@ -55,7 +55,8 @@ class AccountWithoutContactRule:
     def run(self) -> ScanResult:
         result = ScanResult()
         accounts = self.client.get_all_records(
-            self.s.zoho_accounts_module, fields=["id", "Account_Name", "Owner"]
+            self.s.zoho_accounts_module,
+            fields=["id", "Account_Name", "Owner", "Created_Time"],
         )
         alerts = self.client.get_all_records(
             self.s.zoho_alerts_module,
@@ -78,18 +79,38 @@ class AccountWithoutContactRule:
             unique_key = f"ACCOUNT-{account_id}-WITHOUT-CONTACT"
             existing = by_key.get(unique_key)
             try:
+                created = _parse_zoho_datetime(account.get("Created_Time"))
+                if not created:
+                    logger.warning(
+                        "Account Without Contact could not parse Created_Time "
+                        "account_id=%s",
+                        account_id,
+                    )
+                account_age_days = (
+                    max(
+                        0,
+                        (
+                            datetime.now(timezone.utc)
+                            - created.astimezone(timezone.utc)
+                        ).days,
+                    )
+                    if created
+                    else 0
+                )
                 has_contacts = self.client.has_related_records(
                     self.s.zoho_accounts_module, account_id, "Contacts"
                 )
                 if not has_contacts:
                     if existing and existing.get(self.s.alert_status_field) != "Resolved":
                         result.alerts_already_open += 1
-                        self._update_days_open(existing)
+                        self._update_open_alert(existing, account_age_days)
                     elif existing:
-                        self._reopen_alert(account, str(existing["id"]))
+                        self._reopen_alert(
+                            account, str(existing["id"]), account_age_days
+                        )
                         result.alerts_updated += 1
                     else:
-                        self._create_alert(account, unique_key)
+                        self._create_alert(account, unique_key, account_age_days)
                         result.alerts_created += 1
                 elif existing and existing.get(self.s.alert_status_field) != "Resolved":
                     self._resolve_alert(str(existing["id"]))
@@ -104,7 +125,9 @@ class AccountWithoutContactRule:
                 result.errors += 1
         return result
 
-    def _create_alert(self, account: dict, unique_key: str) -> None:
+    def _create_alert(
+        self, account: dict, unique_key: str, inactive_days: int
+    ) -> None:
         now = _zoho_datetime_now()
         owner = account.get("Owner") or {}
         account_name = account.get("Account_Name", "Unnamed Account")
@@ -112,8 +135,10 @@ class AccountWithoutContactRule:
             self.s.alert_name_field: f"No contact: {account_name}",
             self.s.alert_category_field: self.category,
             self.s.alert_account_field: {"id": str(account["id"])},
-            self.s.alert_inactive_days_field: 0,
-            self.s.alert_severity_field: alert_severity(self.category),
+            self.s.alert_inactive_days_field: inactive_days,
+            self.s.alert_severity_field: alert_severity(
+                self.category, inactive_days
+            ),
             self.s.alert_status_field: "Open",
             self.s.alert_recommended_action_field: (
                 "Add and verify at least one decision-maker or business contact."
@@ -130,14 +155,18 @@ class AccountWithoutContactRule:
             record[self.s.alert_responsible_owner_field] = {"id": str(owner["id"])}
         self.client.create_record(self.s.zoho_alerts_module, record)
 
-    def _reopen_alert(self, account: dict, alert_id: str) -> None:
+    def _reopen_alert(
+        self, account: dict, alert_id: str, inactive_days: int
+    ) -> None:
         account_name = account.get("Account_Name", "Unnamed Account")
         changes = {
             self.s.alert_status_field: "Open",
             self.s.alert_name_field: f"No contact: {account_name}",
-            self.s.alert_severity_field: alert_severity(self.category),
+            self.s.alert_severity_field: alert_severity(
+                self.category, inactive_days
+            ),
             self.s.alert_generated_on_field: _zoho_datetime_now(),
-            self.s.alert_inactive_days_field: 0,
+            self.s.alert_inactive_days_field: inactive_days,
             self.s.alert_recommended_action_field: (
                 "Add and verify at least one decision-maker or business contact."
             ),
@@ -149,14 +178,21 @@ class AccountWithoutContactRule:
             changes[self.s.alert_responsible_owner_field] = {"id": str(owner["id"])}
         self.client.update_record(self.s.zoho_alerts_module, alert_id, changes)
 
-    def _update_days_open(self, alert: dict) -> None:
+    def _update_open_alert(self, alert: dict, inactive_days: int) -> None:
+        changes = {
+            self.s.alert_inactive_days_field: inactive_days,
+            self.s.alert_severity_field: alert_severity(
+                self.category, inactive_days
+            ),
+        }
         field = getattr(self.s, "alert_days_open_field", None)
         if field:
-            self.client.update_record(
-                self.s.zoho_alerts_module,
-                str(alert["id"]),
-                {field: _days_open(alert, self.s.alert_generated_on_field)},
-            )
+            changes[field] = _days_open(alert, self.s.alert_generated_on_field)
+        self.client.update_record(
+            self.s.zoho_alerts_module,
+            str(alert["id"]),
+            changes,
+        )
 
     def _resolve_alert(self, alert_id: str) -> None:
         changes = {
@@ -239,13 +275,23 @@ class AlertRule:
         if existing:
             if existing.get(self.s.alert_status_field) != "Resolved":
                 result.alerts_already_open += 1
+                inactive_days = kwargs.get("inactive_days", 0)
+                changes = {
+                    self.s.alert_inactive_days_field: inactive_days,
+                    self.s.alert_severity_field: alert_severity(
+                        self.category, inactive_days
+                    ),
+                }
                 field = getattr(self.s, "alert_days_open_field", None)
                 if field:
-                    self.client.update_record(
-                        self.s.zoho_alerts_module,
-                        str(existing["id"]),
-                        {field: _days_open(existing, self.s.alert_generated_on_field)},
+                    changes[field] = _days_open(
+                        existing, self.s.alert_generated_on_field
                     )
+                self.client.update_record(
+                    self.s.zoho_alerts_module,
+                    str(existing["id"]),
+                    changes,
+                )
                 return
             changes = {
                 self.s.alert_status_field: "Open",
@@ -283,7 +329,14 @@ class RelatedRecordMissingRule(AlertRule):
         result = ScanResult()
         module = getattr(self.s, self.source_module_setting)
         records = self.client.get_all_records(
-            module, fields=["id", self.record_name_field, "Owner", "Account_Name"]
+            module,
+            fields=[
+                "id",
+                self.record_name_field,
+                "Owner",
+                "Account_Name",
+                "Created_Time",
+            ],
         )
         alerts = self._alerts_by_key()
         for record in records:
@@ -291,6 +344,24 @@ class RelatedRecordMissingRule(AlertRule):
             record_id = str(record["id"])
             key = f"{self.unique_key_suffix.split('-', 1)[0]}-{record_id}-{self.unique_key_suffix.split('-', 1)[1]}"
             try:
+                created = _parse_zoho_datetime(record.get("Created_Time"))
+                if not created:
+                    logger.warning(
+                        "%s could not parse Created_Time record_id=%s",
+                        self.category,
+                        record_id,
+                    )
+                inactive_days = (
+                    max(
+                        0,
+                        (
+                            datetime.now(timezone.utc)
+                            - created.astimezone(timezone.utc)
+                        ).days,
+                    )
+                    if created
+                    else 0
+                )
                 has_related = self.client.has_related_records(
                     module, record_id, getattr(self.s, self.related_list_setting)
                 )
@@ -316,6 +387,7 @@ class RelatedRecordMissingRule(AlertRule):
                     title=f"{self.title_prefix}: {title_name}",
                     description=f"{name} has no related {self.description_noun} in Zoho CRM.",
                     action=self.action,
+                    inactive_days=inactive_days,
                     account_id=account_id,
                     deal_id=record_id if module == self.s.zoho_deals_module else None,
                 )
@@ -406,9 +478,16 @@ class StaleRule(AlertRule):
                     continue
                 modified = _parse_zoho_datetime(record.get("Modified_Time"))
                 if not modified:
-                    result.errors += 1
-                    continue
-                days = max(0, (now - modified.astimezone(timezone.utc)).days)
+                    logger.warning(
+                        "%s could not parse Modified_Time record_id=%s",
+                        self.category,
+                        record.get("id"),
+                    )
+                days = (
+                    max(0, (now - modified.astimezone(timezone.utc)).days)
+                    if modified
+                    else 0
+                )
                 record_id = str(record["id"])
                 key = f"{self.key_prefix}-{record_id}-STALE"
                 if days <= getattr(self.s, self.threshold_setting):
