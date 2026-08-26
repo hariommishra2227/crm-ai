@@ -25,6 +25,18 @@ def alert_severity(category: str, inactive_days: int = 0) -> str:
     return "Medium"
 
 
+def alert_category_value(category: str) -> str:
+    return {
+        "Account Without Contact": "No Contact",
+        "Account Without Deal": "No Deal",
+        "Account Without Quote": "No Quote",
+        "Incomplete Account Profile": "Incomplete Profile",
+        "Stale Account": "Stale Account",
+        "Stale Deal": "Stale Deal",
+        "Deal Without Quote": "Deal No Quote",
+    }.get(category, category)
+
+
 def _days_open(alert: dict, detected_on_field: str = "Detected_On") -> int:
     detected = _parse_zoho_datetime(alert.get(detected_on_field))
     if not detected:
@@ -103,7 +115,9 @@ class AccountWithoutContactRule:
                 if not has_contacts:
                     if existing and existing.get(self.s.alert_status_field) != "Resolved":
                         result.alerts_already_open += 1
-                        self._update_open_alert(existing, account_age_days)
+                        self._update_open_alert(
+                            existing, account, account_age_days
+                        )
                     elif existing:
                         self._reopen_alert(
                             account, str(existing["id"]), account_age_days
@@ -132,8 +146,8 @@ class AccountWithoutContactRule:
         owner = account.get("Owner") or {}
         account_name = account.get("Account_Name", "Unnamed Account")
         record = {
-            self.s.alert_name_field: f"No contact: {account_name}",
-            self.s.alert_category_field: self.category,
+            self.s.alert_name_field: account_name,
+            self.s.alert_category_field: alert_category_value(self.category),
             self.s.alert_account_field: {"id": str(account["id"])},
             self.s.alert_inactive_days_field: inactive_days,
             self.s.alert_severity_field: alert_severity(
@@ -161,7 +175,8 @@ class AccountWithoutContactRule:
         account_name = account.get("Account_Name", "Unnamed Account")
         changes = {
             self.s.alert_status_field: "Open",
-            self.s.alert_name_field: f"No contact: {account_name}",
+            self.s.alert_name_field: account_name,
+            self.s.alert_category_field: alert_category_value(self.category),
             self.s.alert_severity_field: alert_severity(
                 self.category, inactive_days
             ),
@@ -178,13 +193,23 @@ class AccountWithoutContactRule:
             changes[self.s.alert_responsible_owner_field] = {"id": str(owner["id"])}
         self.client.update_record(self.s.zoho_alerts_module, alert_id, changes)
 
-    def _update_open_alert(self, alert: dict, inactive_days: int) -> None:
+    def _update_open_alert(
+        self, alert: dict, account: dict, inactive_days: int
+    ) -> None:
+        account_name = account.get("Account_Name", "Unnamed Account")
         changes = {
+            self.s.alert_name_field: account_name,
+            self.s.alert_category_field: alert_category_value(self.category),
             self.s.alert_inactive_days_field: inactive_days,
             self.s.alert_severity_field: alert_severity(
                 self.category, inactive_days
             ),
         }
+        owner = account.get("Owner") or {}
+        if owner.get("id"):
+            changes[self.s.alert_responsible_owner_field] = {
+                "id": str(owner["id"])
+            }
         field = getattr(self.s, "alert_days_open_field", None)
         if field:
             changes[field] = _days_open(alert, self.s.alert_generated_on_field)
@@ -246,7 +271,7 @@ class AlertRule:
     ) -> None:
         record = {
             self.s.alert_name_field: title,
-            self.s.alert_category_field: self.category,
+            self.s.alert_category_field: alert_category_value(self.category),
             self.s.alert_inactive_days_field: inactive_days,
             self.s.alert_severity_field: alert_severity(self.category, inactive_days),
             self.s.alert_status_field: "Open",
@@ -277,6 +302,10 @@ class AlertRule:
                 result.alerts_already_open += 1
                 inactive_days = kwargs.get("inactive_days", 0)
                 changes = {
+                    self.s.alert_name_field: kwargs["title"],
+                    self.s.alert_category_field: alert_category_value(
+                        self.category
+                    ),
                     self.s.alert_inactive_days_field: inactive_days,
                     self.s.alert_severity_field: alert_severity(
                         self.category, inactive_days
@@ -287,6 +316,11 @@ class AlertRule:
                     changes[field] = _days_open(
                         existing, self.s.alert_generated_on_field
                     )
+                owner = kwargs["source"].get("Owner") or {}
+                if owner.get("id"):
+                    changes[self.s.alert_responsible_owner_field] = {
+                        "id": str(owner["id"])
+                    }
                 self.client.update_record(
                     self.s.zoho_alerts_module,
                     str(existing["id"]),
@@ -296,6 +330,7 @@ class AlertRule:
             changes = {
                 self.s.alert_status_field: "Open",
                 self.s.alert_name_field: kwargs["title"],
+                self.s.alert_category_field: alert_category_value(self.category),
                 self.s.alert_recommended_action_field: kwargs["action"],
                 self.s.alert_generated_on_field: _zoho_datetime_now(),
                 self.s.alert_severity_field: alert_severity(
@@ -307,6 +342,11 @@ class AlertRule:
                 changes[self.s.alert_days_open_field] = 0
             if self.s.alert_description_field:
                 changes[self.s.alert_description_field] = kwargs["description"]
+            owner = kwargs["source"].get("Owner") or {}
+            if owner.get("id"):
+                changes[self.s.alert_responsible_owner_field] = {
+                    "id": str(owner["id"])
+                }
             self.client.update_record(
                 self.s.zoho_alerts_module, str(existing["id"]), changes
             )
@@ -376,15 +416,17 @@ class RelatedRecordMissingRule(AlertRule):
                 account_id = record_id if module == self.s.zoho_accounts_module else (
                     str(account["id"]) if isinstance(account, dict) and account.get("id") else None
                 )
-                title_name = name
-                if module != self.s.zoho_accounts_module and isinstance(account, dict) and account.get("name"):
-                    title_name = f"{name} - {account['name']}"
+                alert_name = name
+                if module != self.s.zoho_accounts_module:
+                    alert_name = f"{self.title_prefix}: {name}"
+                    if isinstance(account, dict) and account.get("name"):
+                        alert_name = f"{alert_name} - {account['name']}"
                 self._create_if_missing(
                     result,
                     alerts.get(key),
                     source=record,
                     unique_key=key,
-                    title=f"{self.title_prefix}: {title_name}",
+                    title=alert_name,
                     description=f"{name} has no related {self.description_noun} in Zoho CRM.",
                     action=self.action,
                     inactive_days=inactive_days,
@@ -506,12 +548,25 @@ class StaleRule(AlertRule):
                         f"Stage: {stage or 'Not available'}; inactive days: {days}."
                     )
                 existing = alerts.get(key)
+                alert_name = (
+                    name
+                    if self.key_prefix == "ACCOUNT"
+                    else f"{self.title_prefix} {days} days: {name}"
+                )
                 if existing and existing.get(self.s.alert_status_field) != "Resolved":
                     changes = {
-                        self.s.alert_name_field: f"{self.title_prefix} {days} days: {name}",
+                        self.s.alert_name_field: alert_name,
+                        self.s.alert_category_field: alert_category_value(
+                            self.category
+                        ),
                         self.s.alert_inactive_days_field: days,
                         self.s.alert_severity_field: alert_severity(self.category, days),
                     }
+                    owner = record.get("Owner") or {}
+                    if owner.get("id"):
+                        changes[self.s.alert_responsible_owner_field] = {
+                            "id": str(owner["id"])
+                        }
                     if getattr(self.s, "alert_days_open_field", None):
                         changes[self.s.alert_days_open_field] = _days_open(
                             existing, self.s.alert_generated_on_field
@@ -533,7 +588,7 @@ class StaleRule(AlertRule):
                     existing,
                     source=record,
                     unique_key=key,
-                    title=f"{self.title_prefix} {days} days: {name}",
+                    title=alert_name,
                     description=description,
                     action=self.action,
                     inactive_days=days,
@@ -576,12 +631,41 @@ class IncompleteAccountProfileRule(AlertRule):
 
     def run(self) -> ScanResult:
         result = ScanResult()
-        fields = list(dict.fromkeys(["id", "Account_Name", "Owner", *self.s.required_account_profile_fields]))
+        fields = list(
+            dict.fromkeys(
+                [
+                    "id",
+                    "Account_Name",
+                    "Owner",
+                    "Created_Time",
+                    *self.s.required_account_profile_fields,
+                ]
+            )
+        )
         accounts = self.client.get_all_records(self.s.zoho_accounts_module, fields=fields)
         alerts = self._alerts_by_key()
         for account in accounts:
             result.accounts_checked += 1
             try:
+                account_id = str(account["id"])
+                created = _parse_zoho_datetime(account.get("Created_Time"))
+                if not created:
+                    logger.warning(
+                        "Incomplete Account Profile could not parse Created_Time "
+                        "account_id=%s",
+                        account_id,
+                    )
+                inactive_days = (
+                    max(
+                        0,
+                        (
+                            datetime.now(timezone.utc)
+                            - created.astimezone(timezone.utc)
+                        ).days,
+                    )
+                    if created
+                    else 0
+                )
                 missing = [field for field in self.s.required_account_profile_fields if not account.get(field)]
                 if not missing:
                     key = f"ACCOUNT-{account['id']}-INCOMPLETE-PROFILE"
@@ -590,15 +674,15 @@ class IncompleteAccountProfileRule(AlertRule):
                         self._resolve_alert(str(existing["id"]))
                         result.alerts_resolved += 1
                     continue
-                account_id = str(account["id"])
                 name = account.get("Account_Name") or "Unnamed Account"
                 key = f"ACCOUNT-{account_id}-INCOMPLETE-PROFILE"
                 labels = ", ".join(field.replace("_", " ") for field in missing)
                 self._create_if_missing(
                     result, alerts.get(key), source=account, unique_key=key,
-                    title=f"Incomplete profile: {name}",
+                    title=name,
                     description=f"{name} is missing: {labels}",
                     action="Complete and verify the missing account profiling information.",
+                    inactive_days=inactive_days,
                     account_id=account_id,
                 )
             except Exception as exc:

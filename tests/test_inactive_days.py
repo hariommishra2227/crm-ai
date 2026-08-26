@@ -65,23 +65,42 @@ def age(days):
 
 def test_account_without_contact_uses_account_created_time():
     client = FakeZoho(
-        [{"id": "1", "Account_Name": "ABC", "Created_Time": age(45)}]
+        [
+            {
+                "id": "1",
+                "Account_Name": "ABC",
+                "Owner": {"id": "71"},
+                "Created_Time": age(45),
+            }
+        ]
     )
 
     AccountWithoutContactRule(client, settings()).run()
 
     assert client.created[0]["Inactive_Days"] == 45
+    assert client.created[0]["Name"] == "ABC"
+    assert client.created[0]["Category"] == "No Contact"
+    assert client.created[0]["Owner"] == {"id": "71"}
     assert "Created_Time" in client.requested_fields[0][1]
 
 
 def test_deal_without_quote_uses_deal_created_time():
     client = FakeZoho(
-        [{"id": "2", "Deal_Name": "Renewal", "Created_Time": age(25)}]
+        [
+            {
+                "id": "2",
+                "Deal_Name": "Renewal",
+                "Owner": {"id": "72"},
+                "Created_Time": age(25),
+            }
+        ]
     )
 
     DealWithoutQuoteRule(client, settings()).run()
 
     assert client.created[0]["Inactive_Days"] == 25
+    assert client.created[0]["Category"] == "Deal No Quote"
+    assert client.created[0]["Owner"] == {"id": "72"}
 
 
 def test_stale_deal_continues_to_use_modified_time():
@@ -121,7 +140,14 @@ def test_existing_open_missing_relation_alert_gets_latest_inactive_days():
         "Status": "Open",
     }
     client = FakeZoho(
-        [{"id": "5", "Account_Name": "Existing", "Created_Time": age(45)}],
+        [
+            {
+                "id": "5",
+                "Account_Name": "Existing",
+                "Owner": {"id": "75"},
+                "Created_Time": age(45),
+            }
+        ],
         alerts=[alert],
     )
 
@@ -130,6 +156,9 @@ def test_existing_open_missing_relation_alert_gets_latest_inactive_days():
     assert result.alerts_already_open == 1
     assert client.updated[0][1]["Inactive_Days"] == 45
     assert client.updated[0][1]["Severity"] == "Medium"
+    assert client.updated[0][1]["Name"] == "Existing"
+    assert client.updated[0][1]["Category"] == "No Deal"
+    assert client.updated[0][1]["Owner"] == {"id": "75"}
 
 
 def test_existing_stale_deal_severity_is_refreshed_as_days_increase():
