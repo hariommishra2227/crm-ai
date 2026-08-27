@@ -14,13 +14,13 @@ def settings():
         zoho_alerts_module="CRM_Alerts", zoho_account_deals_related_list="Deals",
         stale_deal_days=21,
         required_account_profile_fields=["Account_Name", "Phone"],
-        alert_name_field="Name", alert_category_field="Categor",
+        alert_name_field="Name", alert_category_field="Category",
         alert_account_field="Account", alert_deal_field="Deal",
         alert_responsible_owner_field="Owner",
         alert_inactive_days_field="Inactive_Days", alert_severity_field="Severity",
         alert_status_field="Status", alert_description_field=None,
         alert_recommended_action_field="Recommended_Action",
-        alert_generated_on_field="Detected_On", alert_unique_key_field="Unique_Key",
+        alert_generated_on_field="Generated_On", alert_unique_key_field="Unique_Key",
     )
 
 
@@ -89,6 +89,6 @@ def test_incomplete_profile_creates_one_alert_listing_missing_fields():
     assert "Phone" not in client.created[0]
     assert None not in client.created[0]
     assert client.created[0]["Name"] == "ABC"
-    assert client.created[0]["Categor"] == "Incomplete Profile"
+    assert client.created[0]["Category"] == "Incomplete Profile"
     assert client.created[0]["Inactive_Days"] == 12
     assert client.created[0]["Owner"] == {"id": "7"}

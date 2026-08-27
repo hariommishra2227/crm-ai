@@ -28,7 +28,7 @@ def settings():
         alert_status_field="Status",
         alert_description_field=None,
         alert_recommended_action_field="Recommended_Action",
-        alert_generated_on_field="Detected_On",
+        alert_generated_on_field="Generated_On",
         alert_resolved_on_field=None,
         alert_days_open_field=None,
         alert_unique_key_field="Unique_Key",
