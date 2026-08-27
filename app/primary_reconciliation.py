@@ -136,8 +136,6 @@ class PrimaryAlertReconciler:
     def _account_primary(self, account: dict) -> tuple[str | None, int]:
         aid = str(account["id"])
         created_days = _days(account.get("Created_Time"), label="Account Created_Time", record_id=aid)
-        if any(not account.get(field) for field in self.s.required_account_profile_fields):
-            return "Incomplete Profile", created_days
         contacts = self.client.get_related_records(
             self.s.zoho_accounts_module, aid, "Contacts", fields=["id", "Email", "Phone"]
         )
@@ -145,6 +143,8 @@ class PrimaryAlertReconciler:
             return "No Contact", created_days
         if not any(contact.get("Email") and contact.get("Phone") for contact in contacts):
             return "Incomplete Contact", created_days
+        if any(not account.get(field) for field in self.s.required_account_profile_fields):
+            return "Incomplete Profile", created_days
         if not self.client.has_related_records(self.s.zoho_accounts_module, aid, self.s.zoho_account_deals_related_list):
             return "No Deal", created_days
         if not self.client.has_related_records(self.s.zoho_accounts_module, aid, self.s.zoho_account_quotes_related_list):

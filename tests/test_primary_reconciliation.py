@@ -55,11 +55,11 @@ def account(**changes):
     return value
 
 
-def test_sequential_account_priority_stops_lower_checks():
+def test_no_contact_has_priority_over_incomplete_profile():
     client = FakeZoho([account(Phone=None)])
     result = PrimaryAlertReconciler(client, settings()).run()
-    assert result["primary_incomplete_profile"] == 1
-    assert not any(len(call) == 3 for call in client.read_calls)
+    assert result["primary_no_contact"] == 1
+    assert result["primary_incomplete_profile"] == 0
 
 
 def test_contact_steps_and_at_least_one_valid_contact():
@@ -70,6 +70,41 @@ def test_contact_steps_and_at_least_one_valid_contact():
     valid = FakeZoho([account()], contacts={"A1": [{"Phone": "1"}, {"Email": "a@b", "Phone": "2"}]},
                      account_deals=False)
     assert PrimaryAlertReconciler(valid, settings()).run()["primary_no_deal"] == 1
+
+
+def test_incomplete_contact_has_priority_over_incomplete_profile():
+    client = FakeZoho([account(Phone=None)], contacts={"A1": [{"Email": "a@b"}]})
+    result = PrimaryAlertReconciler(client, settings()).run()
+    assert result["primary_incomplete_contact"] == 1
+    assert result["primary_incomplete_profile"] == 0
+
+
+def test_incomplete_profile_has_priority_over_no_deal():
+    contacts = {"A1": [{"Email": "a@b", "Phone": "2"}]}
+    client = FakeZoho([account(Phone=None)], contacts=contacts, account_deals=False)
+    result = PrimaryAlertReconciler(client, settings()).run()
+    assert result["primary_incomplete_profile"] == 1
+    assert result["primary_no_deal"] == 0
+    assert not any(call == ("Accounts", "A1", "Deals") for call in client.read_calls)
+
+
+def test_no_deal_has_priority_over_no_quote():
+    contacts = {"A1": [{"Email": "a@b", "Phone": "2"}]}
+    client = FakeZoho([account()], contacts=contacts, account_deals=False, account_quotes=False)
+    result = PrimaryAlertReconciler(client, settings()).run()
+    assert result["primary_no_deal"] == 1
+    assert result["primary_no_quote"] == 0
+    assert not any(call == ("Accounts", "A1", "Quotes") for call in client.read_calls)
+
+
+def test_no_quote_has_priority_over_stale_account():
+    contacts = {"A1": [{"Email": "a@b", "Phone": "2"}]}
+    client = FakeZoho(
+        [account(Modified_Time=stamp(100))], contacts=contacts, account_quotes=False
+    )
+    result = PrimaryAlertReconciler(client, settings()).run()
+    assert result["primary_no_quote"] == 1
+    assert result["primary_stale_account"] == 0
 
 
 def test_no_quote_precedes_stale_and_healthy_has_no_create():
