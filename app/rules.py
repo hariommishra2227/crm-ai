@@ -20,7 +20,7 @@ def alert_severity(category: str, inactive_days: int = 0) -> str:
             return "Critical"
         if inactive_days > 30:
             return "High"
-    if category == "Deal Without Quote":
+    if category in {"Deal Without Quote", "Deal No Quote"}:
         return "High"
     return "Medium"
 
@@ -31,6 +31,7 @@ def alert_category_value(category: str) -> str:
         "Account Without Deal": "No Deal",
         "Account Without Quote": "No Quote",
         "Incomplete Account Profile": "Incomplete Profile",
+        "Incomplete Contact": "Incomplete Contact",
         "Stale Account": "Stale Account",
         "Stale Deal": "Stale Deal",
         "Deal Without Quote": "Deal No Quote",
