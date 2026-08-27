@@ -21,6 +21,7 @@ from .rules import (
     StaleDealRule,
 )
 from .zoho import ZohoAPIError, ZohoClient
+from .primary_reconciliation import PrimaryAlertReconciler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 scheduler = BackgroundScheduler(timezone=ZoneInfo("Asia/Kolkata"))
 _full_scan_lock = Lock()
+_account_health_lock = Lock()
 
 
 RULES = {
@@ -73,8 +75,11 @@ def recover_interrupted_scan_runs() -> int:
 
 
 def execute_scan(rule_name: str = "account_without_contact") -> dict:
+    if not _account_health_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Primary reconciliation or scan already running")
     rule_lock = _rule_scan_locks[rule_name]
     if not rule_lock.acquire(blocking=False):
+        _account_health_lock.release()
         raise HTTPException(
             status_code=409,
             detail="Scan already running for this rule",
@@ -83,6 +88,7 @@ def execute_scan(rule_name: str = "account_without_contact") -> dict:
         return _execute_scan_unlocked(rule_name)
     finally:
         rule_lock.release()
+        _account_health_lock.release()
 
 
 def _execute_scan_unlocked(rule_name: str) -> dict:
@@ -301,3 +307,24 @@ def scan_incomplete_account_profile() -> dict:
 @app.post("/scans/all")
 def scan_all() -> dict:
     return execute_all_scans()
+
+
+@app.post("/alerts/reconcile-primary")
+def reconcile_primary(
+    dry_run: bool = Query(default=True),
+    confirm: str | None = Query(default=None),
+) -> dict:
+    if not dry_run and confirm != "RECONCILE_PRIMARY_ALERTS":
+        raise HTTPException(status_code=400, detail="Exact confirmation is required for real reconciliation")
+    if not _account_health_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Account-health reconciliation or scan already running")
+    client: ZohoClient | None = None
+    try:
+        client = ZohoClient(settings)
+        return PrimaryAlertReconciler(client, settings, dry_run=dry_run).run()
+    except ZohoAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        if client:
+            client.close()
+        _account_health_lock.release()
