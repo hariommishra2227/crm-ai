@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import Settings
 from app.primary_reconciliation import PrimaryAlertReconciler
+from app.rules import alert_severity
 
 
 def settings():
@@ -18,15 +19,17 @@ def stamp(days=0):
 
 class FakeZoho:
     def __init__(self, accounts, *, contacts=None, account_deals=True, account_quotes=True,
-                 deals=None, deal_quotes=True, alerts=None):
+                 deals=None, deal_quotes=True, quotes=None, alerts=None):
         self.accounts, self.contacts = accounts, contacts or {}
         self.account_deals, self.account_quotes = account_deals, account_quotes
         self.deals, self.deal_quotes, self.alerts = deals or [], deal_quotes, alerts or []
+        self.quotes = quotes or []
         self.created, self.updated, self.read_calls = [], [], []
 
     def get_all_records(self, module, fields=None):
         self.read_calls.append((module, fields))
-        return {"Accounts": self.accounts, "Deals": self.deals, "CRM_Alert": self.alerts}[module]
+        return {"Accounts": self.accounts, "Deals": self.deals, "Quotes": self.quotes,
+                "CRM_Alert": self.alerts}[module]
 
     def get_related_records(self, module, record_id, related_list, fields=None):
         self.read_calls.append((module, record_id, related_list))
@@ -100,10 +103,10 @@ def test_incomplete_profile_with_deal_and_quote_is_healthy_when_active():
         contact=[{"Phone": "123"}], profile_complete=False, deal=True, quote=True
     )
     assert result["healthy_accounts"] == 1
-    assert result["primary_incomplete_profile"] == 0
+    assert "primary_incomplete_profile" not in result
 
 
-def test_no_deal_classification_uses_contact_then_profile_facts():
+def test_no_deal_classification_uses_contact_not_profile_facts():
     _, no_contact = reconcile_account(contact=None, deal=False, quote=False)
     _, incomplete_contact = reconcile_account(
         contact=[{"Email": None, "Phone": None}], deal=False, quote=False
@@ -116,7 +119,7 @@ def test_no_deal_classification_uses_contact_then_profile_facts():
     )
     assert no_contact["primary_no_contact"] == 1
     assert incomplete_contact["primary_incomplete_contact"] == 1
-    assert incomplete_profile["primary_incomplete_profile"] == 1
+    assert incomplete_profile["primary_no_deal"] == 1
     assert no_deal["primary_no_deal"] == 1
 
 
@@ -130,7 +133,7 @@ def test_deal_and_quote_use_staleness_for_final_classification():
 
 def test_all_account_facts_are_collected_before_classification():
     client, result = reconcile_account(contact=None, profile_complete=False, deal=False, quote=True)
-    assert result["healthy_accounts"] == 1
+    assert result["primary_no_contact"] == 1
     assert result["accounts_without_contact"] == 1
     assert result["accounts_profile_incomplete"] == 1
     assert result["accounts_without_deal"] == 1
@@ -186,3 +189,47 @@ def test_dry_run_never_writes_and_deal_key_is_separate():
     assert result["would_create"] == 1
     assert result["sample_actions"][0]["unique_key"] == "PRIMARY-DEAL-D1"
     assert client.created == [] and client.updated == []
+
+
+def test_quote_active_old_is_stale_recent_and_final_are_healthy():
+    quotes = [
+        {"id": "Q1", "Subject": "Old", "Quote_Stage": "Draft", "Modified_Time": stamp(20)},
+        {"id": "Q2", "Subject": "Recent", "Quote_Stage": "Draft", "Modified_Time": stamp(2)},
+        {"id": "Q3", "Subject": "Done", "Quote_Stage": "Accepted", "Modified_Time": stamp(40)},
+    ]
+    client = FakeZoho([], quotes=quotes)
+    result = PrimaryAlertReconciler(client, settings()).run()
+    assert result["quotes_checked"] == 3
+    assert result["quotes_active"] == 2
+    assert result["quotes_final"] == 1
+    assert result["quotes_stale"] == result["primary_stale_quote"] == 1
+    assert result["quote_would_create"] == 1
+    assert result["sample_actions"][0]["unique_key"] == "PRIMARY-QUOTE-Q1"
+    assert client.created == [] and client.updated == []
+
+
+def test_existing_quote_primary_is_reused_without_duplicate():
+    quote = {"id": "Q1", "Subject": "Old", "Quote_Stage": "Draft", "Modified_Time": stamp(20)}
+    alert = {"id": "1", "Category": "Stale Quote", "Status": "Open",
+             "Unique_Key": "PRIMARY-QUOTE-Q1"}
+    client = FakeZoho([], quotes=[quote], alerts=[alert])
+    first = PrimaryAlertReconciler(client, settings()).run()
+    second = PrimaryAlertReconciler(client, settings()).run()
+    assert first["quote_would_create"] == second["quote_would_create"] == 0
+    assert first["quote_would_update"] == second["quote_would_update"] == 1
+
+
+def test_final_quote_resolves_existing_primary_only_in_real_run():
+    quote = {"id": "Q1", "Subject": "Done", "Quote_Stage": "Accepted", "Modified_Time": stamp(40)}
+    alert = {"id": "1", "Category": "Stale Quote", "Status": "Open",
+             "Unique_Key": "PRIMARY-QUOTE-Q1"}
+    client = FakeZoho([], quotes=[quote], alerts=[alert])
+    result = PrimaryAlertReconciler(client, settings(), dry_run=False).run()
+    assert result["quote_would_resolve"] == 1
+    assert client.updated == [("1", {"Status": "Resolved"})]
+
+
+def test_stale_quote_severity_bands():
+    assert alert_severity("Stale Quote", 30) == "Medium"
+    assert alert_severity("Stale Quote", 31) == "High"
+    assert alert_severity("Stale Quote", 61) == "Critical"
