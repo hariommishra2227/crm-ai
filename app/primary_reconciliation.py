@@ -103,7 +103,11 @@ class PrimaryAlertReconciler:
                 self.counts["ambiguous_skipped"] += 1
 
         keys = [
-            "accounts_checked", "healthy_accounts", "primary_incomplete_profile",
+            "accounts_checked", "accounts_with_contact", "accounts_without_contact",
+            "accounts_with_incomplete_contact", "accounts_profile_complete",
+            "accounts_profile_incomplete", "accounts_with_deal", "accounts_without_deal",
+            "accounts_with_quote", "accounts_without_quote", "accounts_stale",
+            "healthy_accounts", "primary_incomplete_profile",
             "primary_no_contact", "primary_incomplete_contact", "primary_no_deal",
             "primary_no_quote", "primary_stale_account", "would_create", "would_update",
             "would_resolve", "ambiguous_skipped",
@@ -140,17 +144,54 @@ class PrimaryAlertReconciler:
             self.s.zoho_accounts_module, aid, "Contacts", fields=["id", "Email", "Phone"]
         )
         if not contacts:
-            return "No Contact", created_days
-        if not any(contact.get("Email") and contact.get("Phone") for contact in contacts):
-            return "Incomplete Contact", created_days
-        if any(not account.get(field) for field in self.s.required_account_profile_fields):
-            return "Incomplete Profile", created_days
-        if not self.client.has_related_records(self.s.zoho_accounts_module, aid, self.s.zoho_account_deals_related_list):
-            return "No Deal", created_days
-        if not self.client.has_related_records(self.s.zoho_accounts_module, aid, self.s.zoho_account_quotes_related_list):
-            return "No Quote", created_days
+            contact_status = "No Contact"
+            self.counts["accounts_without_contact"] += 1
+        else:
+            self.counts["accounts_with_contact"] += 1
+            contact_status = (
+                "Valid"
+                if any(contact.get("Email") or contact.get("Phone") for contact in contacts)
+                else "Incomplete Contact"
+            )
+            if contact_status == "Incomplete Contact":
+                self.counts["accounts_with_incomplete_contact"] += 1
+
+        profile_complete = all(
+            account.get(field) for field in self.s.required_account_profile_fields
+        )
+        self.counts[
+            "accounts_profile_complete" if profile_complete else "accounts_profile_incomplete"
+        ] += 1
+
+        has_deal = self.client.has_related_records(
+            self.s.zoho_accounts_module, aid, self.s.zoho_account_deals_related_list
+        )
+        self.counts["accounts_with_deal" if has_deal else "accounts_without_deal"] += 1
+
+        has_quote = self.client.has_related_records(
+            self.s.zoho_accounts_module, aid, self.s.zoho_account_quotes_related_list
+        )
+        self.counts["accounts_with_quote" if has_quote else "accounts_without_quote"] += 1
+
         stale_days = _days(account.get("Modified_Time"), label="Account Modified_Time", record_id=aid)
-        return ("Stale Account", stale_days) if stale_days > self.s.stale_account_days else (None, 0)
+        is_stale = stale_days > self.s.stale_account_days
+        if is_stale:
+            self.counts["accounts_stale"] += 1
+
+        if has_deal and not has_quote:
+            return "No Quote", created_days
+        if has_quote:
+            return ("Stale Account", stale_days) if is_stale else (None, 0)
+        if not has_deal:
+            if contact_status == "No Contact":
+                return "No Contact", created_days
+            if contact_status == "Incomplete Contact":
+                return "Incomplete Contact", created_days
+            if not profile_complete:
+                return "Incomplete Profile", created_days
+            return "No Deal", created_days
+        logger.warning("unexpected account fact combination account_id=%s", aid)
+        return None, 0
 
     def _deal_primary(self, deal: dict) -> tuple[str | None, int]:
         did = str(deal["id"])
