@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     ]
     # CRM Alerts Field API Names
     alert_name_field: str = "Name"
-    alert_category_field: str = "Categor"
+    alert_category_field: str = "Category"
     alert_account_field: str = "Account"
     alert_deal_field: str = "Deal"
     alert_responsible_owner_field: str = "Owner"
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
 
     alert_inactive_days_field: str = "Inactive_Days"
     alert_recommended_action_field: str = "Recommended_Action"
-    alert_generated_on_field: str = "Detected_On"
+    alert_generated_on_field: str = "Generated_On"
     alert_unique_key_field: str = "Unique_Key"
     alert_days_open_field: str | None = None
 

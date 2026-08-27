@@ -8,7 +8,7 @@ def settings():
         zoho_accounts_module="Accounts",
         zoho_alerts_module="CRM_Alerts",
         alert_name_field="Name",
-        alert_category_field="Categor",
+        alert_category_field="Category",
         alert_account_field="Account",
         alert_responsible_owner_field="Owner",
         alert_inactive_days_field="Inactive_Days",
@@ -16,7 +16,7 @@ def settings():
         alert_status_field="Status",
         alert_description_field=None,
         alert_recommended_action_field="Recommended_Action",
-        alert_generated_on_field="Detected_On",
+        alert_generated_on_field="Generated_On",
         alert_resolved_on_field=None,
         alert_unique_key_field="Unique_Key",
     )
