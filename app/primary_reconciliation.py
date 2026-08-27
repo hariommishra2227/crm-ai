@@ -29,6 +29,7 @@ DEAL_LEGACY = {
     "deal without quote": "Deal No Quote", "deal_without_quote": "Deal No Quote",
     "deal no quote": "Deal No Quote", "stale deal": "Stale Deal", "stale_deal": "Stale Deal",
 }
+QUOTE_LEGACY = {"stale quote": "Stale Quote", "stale_quote": "Stale Quote"}
 ACCOUNT_NAME_PREFIXES = ("no contact: ", "no deal: ", "no quote: ")
 
 
@@ -63,6 +64,7 @@ class PrimaryAlertReconciler:
         alerts = self.client.get_all_records(self.s.zoho_alerts_module, fields=self._alert_fields())
         account_alerts: dict[str, list[dict]] = {}
         deal_alerts: dict[str, list[dict]] = {}
+        quote_alerts: dict[str, list[dict]] = {}
         for alert in alerts:
             if self._is_account_alert(alert):
                 aid = _lookup_id(alert.get(self.s.alert_account_field))
@@ -76,6 +78,15 @@ class PrimaryAlertReconciler:
                     deal_alerts.setdefault(did, []).append(alert)
                 else:
                     self.counts["ambiguous_skipped"] += 1
+            if self._is_quote_alert(alert):
+                qid = _lookup_id(alert.get(self.s.alert_quote_field)) if self.s.alert_quote_field else None
+                key = str(alert.get(self.s.alert_unique_key_field) or "").upper()
+                if not qid and key.startswith("PRIMARY-QUOTE-"):
+                    qid = key.removeprefix("PRIMARY-QUOTE-")
+                if qid:
+                    quote_alerts.setdefault(qid, []).append(alert)
+                else:
+                    self.counts["ambiguous_skipped"] += 1
 
         for account in accounts:
             self.counts["accounts_checked"] += 1
@@ -85,7 +96,7 @@ class PrimaryAlertReconciler:
                     self.counts["healthy_accounts"] += 1
                 else:
                     self.counts["primary_" + remark.lower().replace(" ", "_")] += 1
-                self._reconcile(account, remark, days, account_alerts.get(str(account["id"]), []), deal=False)
+                self._reconcile(account, remark, days, account_alerts.get(str(account["id"]), []), kind="account")
             except Exception as exc:
                 logger.warning("primary account reconciliation failed account_id=%s error=%s", account.get("id"), exc)
                 self.counts["ambiguous_skipped"] += 1
@@ -97,9 +108,27 @@ class PrimaryAlertReconciler:
         for deal in deals:
             try:
                 remark, days = self._deal_primary(deal)
-                self._reconcile(deal, remark, days, deal_alerts.get(str(deal["id"]), []), deal=True)
+                self._reconcile(deal, remark, days, deal_alerts.get(str(deal["id"]), []), kind="deal")
             except Exception as exc:
                 logger.warning("primary deal reconciliation failed deal_id=%s error=%s", deal.get("id"), exc)
+                self.counts["ambiguous_skipped"] += 1
+
+        quotes = self.client.get_all_records(
+            self.s.zoho_quotes_module,
+            fields=list(dict.fromkeys(filter(None, [
+                "id", self.s.quote_name_field, "Owner", "Account_Name", "Deal_Name",
+                self.s.quote_status_field, "Created_Time", "Modified_Time",
+            ]))),
+        )
+        for quote in quotes:
+            self.counts["quotes_checked"] += 1
+            try:
+                remark, days = self._quote_primary(quote)
+                if remark:
+                    self.counts["primary_stale_quote"] += 1
+                self._reconcile(quote, remark, days, quote_alerts.get(str(quote["id"]), []), kind="quote")
+            except Exception as exc:
+                logger.warning("primary quote reconciliation failed quote_id=%s error=%s", quote.get("id"), exc)
                 self.counts["ambiguous_skipped"] += 1
 
         keys = [
@@ -107,10 +136,12 @@ class PrimaryAlertReconciler:
             "accounts_with_incomplete_contact", "accounts_profile_complete",
             "accounts_profile_incomplete", "accounts_with_deal", "accounts_without_deal",
             "accounts_with_quote", "accounts_without_quote", "accounts_stale",
-            "healthy_accounts", "primary_incomplete_profile",
+            "healthy_accounts",
             "primary_no_contact", "primary_incomplete_contact", "primary_no_deal",
             "primary_no_quote", "primary_stale_account", "would_create", "would_update",
-            "would_resolve", "ambiguous_skipped",
+            "would_resolve", "ambiguous_skipped", "quotes_checked", "quotes_final",
+            "quotes_active", "quotes_stale", "primary_stale_quote", "quote_would_create",
+            "quote_would_update", "quote_would_resolve",
         ]
         return {**{key: self.counts[key] for key in keys}, "dry_run": self.dry_run, "sample_actions": self.sample}
 
@@ -118,6 +149,7 @@ class PrimaryAlertReconciler:
         return list(dict.fromkeys(filter(None, [
             "id", self.s.alert_name_field, self.s.alert_category_field,
             self.s.alert_account_field, self.s.alert_deal_field, self.s.alert_status_field,
+            self.s.alert_quote_field,
             self.s.alert_unique_key_field, self.s.alert_generated_on_field,
         ])))
 
@@ -136,6 +168,11 @@ class PrimaryAlertReconciler:
         key = str(alert.get(self.s.alert_unique_key_field) or "").upper()
         return bool(self._normalized(alert, DEAL_LEGACY) or key.startswith("PRIMARY-DEAL-") or
                     (key.startswith("DEAL-") and any(x in key for x in ("QUOTE", "STALE"))))
+
+    def _is_quote_alert(self, alert: dict) -> bool:
+        key = str(alert.get(self.s.alert_unique_key_field) or "").upper()
+        return bool(self._normalized(alert, QUOTE_LEGACY) or key.startswith("PRIMARY-QUOTE-") or
+                    (key.startswith("QUOTE-") and "STALE" in key))
 
     def _account_primary(self, account: dict) -> tuple[str | None, int]:
         aid = str(account["id"])
@@ -180,64 +217,86 @@ class PrimaryAlertReconciler:
 
         if has_deal and not has_quote:
             return "No Quote", created_days
-        if has_quote:
+        if has_deal and has_quote:
             return ("Stale Account", stale_days) if is_stale else (None, 0)
         if not has_deal:
             if contact_status == "No Contact":
                 return "No Contact", created_days
             if contact_status == "Incomplete Contact":
                 return "Incomplete Contact", created_days
-            if not profile_complete:
-                return "Incomplete Profile", created_days
             return "No Deal", created_days
         logger.warning("unexpected account fact combination account_id=%s", aid)
         return None, 0
 
     def _deal_primary(self, deal: dict) -> tuple[str | None, int]:
         did = str(deal["id"])
-        if str(deal.get("Stage") or "").strip().casefold() in {"closed won", "closed lost"}:
+        if str(deal.get("Stage") or "").strip().casefold() in {
+            value.casefold() for value in self.s.final_deal_stages
+        }:
             return None, 0
         if not self.client.has_related_records(self.s.zoho_deals_module, did, self.s.zoho_deal_quotes_related_list):
             return "Deal No Quote", _days(deal.get("Created_Time"), label="Deal Created_Time", record_id=did)
         stale_days = _days(deal.get("Modified_Time"), label="Deal Modified_Time", record_id=did)
         return ("Stale Deal", stale_days) if stale_days > self.s.stale_deal_days else (None, 0)
 
-    def _reconcile(self, source: dict, remark: str | None, days: int, alerts: list[dict], *, deal: bool) -> None:
+    def _quote_primary(self, quote: dict) -> tuple[str | None, int]:
+        qid = str(quote["id"])
+        status = str(quote.get(self.s.quote_status_field) or "").strip().casefold()
+        if status in {value.casefold() for value in self.s.final_quote_statuses}:
+            self.counts["quotes_final"] += 1
+            return None, 0
+        self.counts["quotes_active"] += 1
+        stale_days = _days(quote.get("Modified_Time"), label="Quote Modified_Time", record_id=qid)
+        if stale_days > self.s.stale_quote_days:
+            self.counts["quotes_stale"] += 1
+            return "Stale Quote", stale_days
+        return None, 0
+
+    def _reconcile(self, source: dict, remark: str | None, days: int, alerts: list[dict], *, kind: str) -> None:
         record_id = str(source["id"])
-        key = f"PRIMARY-{'DEAL' if deal else 'ACCOUNT'}-{record_id}"
+        key = f"PRIMARY-{kind.upper()}-{record_id}"
         open_alerts = [a for a in alerts if str(a.get(self.s.alert_status_field) or "").casefold() != "resolved"]
         canonical = None
         if remark:
-            mapping = DEAL_LEGACY if deal else ACCOUNT_LEGACY
+            mapping = {"account": ACCOUNT_LEGACY, "deal": DEAL_LEGACY, "quote": QUOTE_LEGACY}[kind]
             matching = [a for a in alerts if self._normalized(a, mapping) == remark]
             canonical = next((a for a in matching if a in open_alerts), None) or (matching[0] if matching else None)
             if canonical is None:
                 canonical = next((a for a in alerts if a.get(self.s.alert_unique_key_field) == key), None)
-            payload = self._payload(source, remark, days, key, deal=deal)
+            payload = self._payload(source, remark, days, key, kind=kind)
             if canonical:
-                self._action("update", str(canonical["id"]), payload, key)
+                self._action("update", str(canonical["id"]), payload, key, kind=kind)
             else:
-                self._action("create", None, payload, key)
+                self._action("create", None, payload, key, kind=kind)
         for alert in open_alerts:
             if canonical is None or str(alert.get("id")) != str(canonical.get("id")):
-                self._action("resolve", str(alert["id"]), {self.s.alert_status_field: "Resolved"}, key)
+                self._action("resolve", str(alert["id"]), {self.s.alert_status_field: "Resolved"}, key, kind=kind)
 
-    def _payload(self, source: dict, remark: str, days: int, key: str, *, deal: bool) -> dict:
-        name_field = "Deal_Name" if deal else "Account_Name"
+    def _payload(self, source: dict, remark: str, days: int, key: str, *, kind: str) -> dict:
+        name_field = {"account": "Account_Name", "deal": "Deal_Name", "quote": self.s.quote_name_field}[kind]
         payload = {
-            self.s.alert_name_field: source.get(name_field) or ("Unnamed Deal" if deal else "Unnamed Account"),
+            self.s.alert_name_field: source.get(name_field) or f"Unnamed {kind.title()}",
             self.s.alert_category_field: remark, self.s.alert_status_field: "Open",
             self.s.alert_inactive_days_field: days, self.s.alert_severity_field: alert_severity(remark, days),
             self.s.alert_recommended_action_field: self._action_text(remark),
             self.s.alert_unique_key_field: key, self.s.alert_generated_on_field: _zoho_datetime_now(),
         }
-        if deal:
+        if kind == "deal":
             payload[self.s.alert_deal_field] = {"id": str(source["id"])}
             aid = _lookup_id(source.get("Account_Name"))
             if aid:
                 payload[self.s.alert_account_field] = {"id": aid}
-        else:
+        elif kind == "account":
             payload[self.s.alert_account_field] = {"id": str(source["id"])}
+        else:
+            if self.s.alert_quote_field:
+                payload[self.s.alert_quote_field] = {"id": str(source["id"])}
+            aid = _lookup_id(source.get("Account_Name"))
+            did = _lookup_id(source.get("Deal_Name"))
+            if aid:
+                payload[self.s.alert_account_field] = {"id": aid}
+            if did:
+                payload[self.s.alert_deal_field] = {"id": did}
         owner = source.get("Owner") or {}
         if isinstance(owner, dict) and owner.get("id"):
             payload[self.s.alert_responsible_owner_field] = {"id": str(owner["id"])}
@@ -248,22 +307,25 @@ class PrimaryAlertReconciler:
         return {
             "Incomplete Profile": "Complete and verify the missing account profile fields.",
             "No Contact": "Add and verify at least one account contact.",
-            "Incomplete Contact": "Add both email and phone to at least one related contact.",
+            "Incomplete Contact": "Add an email address or phone number to a related contact.",
             "No Deal": "Review the account and create a deal where appropriate.",
             "No Quote": "Prepare or link a quote for the account.",
             "Stale Account": "Contact the account owner and record the next customer action.",
             "Deal No Quote": "Prepare or link a quotation for this deal.",
             "Stale Deal": "Contact the customer and update the deal status or next action.",
+            "Stale Quote": "Review the quotation and follow up with the customer.",
         }[remark]
 
-    def _action(self, kind: str, alert_id: str | None, payload: dict, key: str) -> None:
-        self.counts["would_" + kind] += 1
+    def _action(self, action: str, alert_id: str | None, payload: dict, key: str, *, kind: str) -> None:
+        self.counts["would_" + action] += 1
+        if kind == "quote":
+            self.counts["quote_would_" + action] += 1
         if len(self.sample) < 20:
-            self.sample.append({"action": kind, "alert_id": alert_id, "unique_key": key,
+            self.sample.append({"action": action, "alert_id": alert_id, "unique_key": key,
                                 "remark": payload.get(self.s.alert_category_field)})
         if self.dry_run:
             return
-        if kind == "create":
+        if action == "create":
             self.client.create_record(self.s.zoho_alerts_module, payload)
         else:
             self.client.update_record(self.s.zoho_alerts_module, str(alert_id), payload)
